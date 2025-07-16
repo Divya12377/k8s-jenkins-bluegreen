@@ -1,0 +1,297 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: docker
+    image: docker:latest
+    command:
+    - cat
+    tty: true
+    volumeMounts:
+    - name: docker-sock
+      mountPath: /var/run/docker.sock
+  - name: kubectl
+    image: bitnami/kubectl:latest
+    command:
+    - cat
+    tty: true
+  - name: aws-cli
+    image: amazon/aws-cli:latest
+    command:
+    - cat
+    tty: true
+    env:
+    - name: AWS_DEFAULT_REGION
+      value: "${AWS_REGION}"
+  volumes:
+  - name: docker-sock
+    hostPath:
+      path: /var/run/docker.sock
+"""
+        }
+    }
+    
+    environment {
+        AWS_REGION = 'us-west-2'
+        ECR_REPO = "${AWS_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com/nodejs-app"
+        CLUSTER_NAME = 'jenkins-bluegreen'
+        CURRENT_COLOR = 'blue'
+        TARGET_COLOR = 'green'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('Determine Target Environment') {
+            steps {
+                container('kubectl') {
+                    script {
+                        try {
+                            def currentEnv = sh(
+                                script: '''
+                                    annotation=$(kubectl get ingress nodejs-app -o jsonpath='{.metadata.annotations.alb\\.ingress\\.kubernetes\\.io/actions\\.blue-green}')
+                                    if echo "$annotation" | grep -q '"serviceName":"nodejs-app-blue","servicePort":80,"weight":100'; then
+                                        echo "blue"
+                                    elif echo "$annotation" | grep -q '"serviceName":"nodejs-app-green","servicePort":80,"weight":100'; then
+                                        echo "green"
+                                    else
+                                        echo "blue"
+                                    fi
+                                ''',
+                                returnStdout: true
+                            ).trim()
+                            
+                            env.CURRENT_COLOR = currentEnv
+                            env.TARGET_COLOR = currentEnv == 'blue' ? 'green' : 'blue'
+                            
+                            echo "Current environment: ${env.CURRENT_COLOR}"
+                            echo "Target environment: ${env.TARGET_COLOR}"
+                        } catch (Exception e) {
+                            echo "Could not determine current environment, defaulting to blue->green"
+                            env.CURRENT_COLOR = 'blue'
+                            env.TARGET_COLOR = 'green'
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Build and Test') {
+            steps {
+                container('docker') {
+                    script {
+                        dir('app') {
+                            sh '''
+                                echo "Building application..."
+                                docker build -t ${ECR_REPO}:${TARGET_COLOR}-${BUILD_NUMBER} .
+                                docker build -t ${ECR_REPO}:${TARGET_COLOR} .
+                                
+                                echo "Running tests..."
+                                docker run --rm ${ECR_REPO}:${TARGET_COLOR} npm test
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Push to ECR') {
+            steps {
+                container('aws-cli') {
+                    sh '''
+                        echo "Logging into ECR..."
+                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPO}
+                        
+                        echo "Pushing image to ECR..."
+                        docker push ${ECR_REPO}:${TARGET_COLOR}-${BUILD_NUMBER}
+                        docker push ${ECR_REPO}:${TARGET_COLOR}
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy to Target Environment') {
+            steps {
+                container('kubectl') {
+                    script {
+                        sh '''
+                            echo "Updating ${TARGET_COLOR} deployment..."
+                            kubectl set image deployment/nodejs-app-${TARGET_COLOR} \
+                                nodejs-app=${ECR_REPO}:${TARGET_COLOR}-${BUILD_NUMBER}
+                            
+                            echo "Scaling ${TARGET_COLOR} deployment to 3 replicas..."
+                            kubectl scale deployment nodejs-app-${TARGET_COLOR} --replicas=3
+                            
+                            echo "Waiting for ${TARGET_COLOR} deployment to be ready..."
+                            kubectl wait --for=condition=available --timeout=300s deployment/nodejs-app-${TARGET_COLOR}
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Health Check') {
+            steps {
+                container('kubectl') {
+                    script {
+                        sh '''
+                            echo "Performing health check on ${TARGET_COLOR} environment..."
+                            
+                            # Get a pod from the target environment
+                            POD=$(kubectl get pods -l app=nodejs-app,version=${TARGET_COLOR} -o jsonpath='{.items[0].metadata.name}')
+                            
+                            if [ -z "$POD" ]; then
+                                echo "No pods found for ${TARGET_COLOR} environment"
+                                exit 1
+                            fi
+                            
+                            # Test health endpoint
+                            kubectl exec $POD -- curl -s -f http://localhost:3000/health
+                            
+                            # Test version endpoint
+                            kubectl exec $POD -- curl -s http://localhost:3000/version
+                            
+                            echo "Health check passed for ${TARGET_COLOR} environment"
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Switch Traffic') {
+            steps {
+                container('kubectl') {
+                    script {
+                        sh '''
+                            echo "Switching traffic to ${TARGET_COLOR} environment..."
+                            
+                            kubectl annotate ingress/nodejs-app \
+                                alb.ingress.kubernetes.io/actions.blue-green="{
+                                    \\"type\\":\\"forward\\",
+                                    \\"forwardConfig\\":{
+                                        \\"targetGroups\\":[
+                                            {\\"serviceName\\":\\"nodejs-app-${TARGET_COLOR}\\",\\"servicePort\\":80,\\"weight\\":100},
+                                            {\\"serviceName\\":\\"nodejs-app-${CURRENT_COLOR}\\",\\"servicePort\\":80,\\"weight\\":0}
+                                        ]
+                                    }
+                                }" --overwrite
+                            
+                            echo "Traffic switched to ${TARGET_COLOR} environment"
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Post-Deploy Validation') {
+            steps {
+                container('kubectl') {
+                    script {
+                        sh '''
+                            echo "Waiting for ALB to update..."
+                            sleep 60
+                            
+                            echo "Performing post-deploy validation..."
+                            
+                            # Get application URL
+                            APP_URL=$(kubectl get ingress nodejs-app -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+                            
+                            if [ -z "$APP_URL" ]; then
+                                echo "Could not get application URL"
+                                exit 1
+                            fi
+                            
+                            # Test the application through the load balancer
+                            for i in {1..5}; do
+                                echo "Test $i: Checking application health..."
+                                curl -f http://$APP_URL/health || exit 1
+                                
+                                echo "Test $i: Checking application version..."
+                                curl -s http://$APP_URL/version | grep -q "${TARGET_COLOR}" || exit 1
+                                
+                                sleep 10
+                            done
+                            
+                            echo "Post-deploy validation passed"
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Scale Down Old Environment') {
+            steps {
+                container('kubectl') {
+                    script {
+                        sh '''
+                            echo "Scaling down ${CURRENT_COLOR} environment..."
+                            kubectl scale deployment nodejs-app-${CURRENT_COLOR} --replicas=0
+                            
+                            echo "Deployment completed successfully"
+                            echo "Active environment: ${TARGET_COLOR}"
+                            echo "Previous environment: ${CURRENT_COLOR} (scaled to 0)"
+                        '''
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        failure {
+            container('kubectl') {
+                script {
+                    sh '''
+                        echo "Deployment failed! Rolling back..."
+                        
+                        # Switch traffic back to current environment
+                        kubectl annotate ingress/nodejs-app \
+                            alb.ingress.kubernetes.io/actions.blue-green="{
+                                \\"type\\":\\"forward\\",
+                                \\"forwardConfig\\":{
+                                    \\"targetGroups\\":[
+                                        {\\"serviceName\\":\\"nodejs-app-${CURRENT_COLOR}\\",\\"servicePort\\":80,\\"weight\\":100},
+                                        {\\"serviceName\\":\\"nodejs-app-${TARGET_COLOR}\\",\\"servicePort\\":80,\\"weight\\":0}
+                                    ]
+                                }
+                            }" --overwrite
+                        
+                        # Scale down failed deployment
+                        kubectl scale deployment nodejs-app-${TARGET_COLOR} --replicas=0
+                        
+                        echo "Rollback completed. Active environment: ${CURRENT_COLOR}"
+                    '''
+                }
+            }
+        }
+        
+        success {
+            echo "Blue-Green deployment completed successfully!"
+            echo "New active environment: ${env.TARGET_COLOR}"
+        }
+        
+        always {
+            container('kubectl') {
+                script {
+                    sh '''
+                        echo "=== Deployment Status ==="
+                        kubectl get deployments
+                        kubectl get pods -l app=nodejs-app
+                        kubectl get ingress nodejs-app
+                        
+                        APP_URL=$(kubectl get ingress nodejs-app -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+                        echo "Application URL: http://$APP_URL"
+                    '''
+                }
+            }
+        }
+    }
+}

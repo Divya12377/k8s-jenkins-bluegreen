@@ -1,0 +1,94 @@
+controller:
+  serviceType: LoadBalancer
+  servicePort: 80
+
+  admin:
+    password: JENKINS_ADMIN_PASSWORD_PLACEHOLDER
+
+  installPlugins:
+    - kubernetes:4029.v5712230ccb_04
+    - workflow-aggregator:596.v8c21c963d92d
+    - git:5.0.0
+    - configuration-as-code:1670.v564dc8b_982d0
+    - bluegreen-deployer:1.5.0
+    - docker-workflow:563.vd5d2e5c4007f
+    - pipeline-stage-view:2.25
+    - build-timeout:1.30
+    - timestamper:1.25
+    - ws-cleanup:0.45
+    - ant:475.vf34069fef73c
+    - gradle:2.8.2
+    - workflow-support:839.v35e2736cfd5c
+    - pipeline-graph-analysis:202.va_d268e64deb_3
+    - pipeline-rest-api:2.32
+    - handlebars:3.0.8
+    - jquery:1.12.4-1
+    - display-url-api:2.3.7
+    - workflow-cps:3691.v28b_14c465da_b_
+    - workflow-job:1400.v7fd111b_ec82f
+    - apache-httpcomponents-client-4-api:4.5.14-150.v7a_b_9d17134a_5
+    - workflow-scm-step:415.v434365564324
+    - workflow-cps-global-lib:609.vd95673f149b_b
+    - branch-api:2.1107.v06d90618a_32f
+    - workflow-multibranch:756.v891d88f2cd46
+    - authentication-tokens:1.4
+    - docker-commons:439.va_3cb_0a_6a_2324
+    - pipeline-milestone-step:111.v449306f708b_7
+    - credentials:1271.v54b_1c877c6b_2
+    - ssh-credentials:308.ve4497b_ccd8f4
+    - credentials-binding:523.vd859a_4b_122e6
+    - scm-api:676.v886669a_199a_a_
+    - workflow-step-api:639.v6eca_cd8c04a_a_
+    - mailer:448.v5b_97805e3767
+    - junit:1217.v4297208a_a_b_ce
+    - matrix-project:785.v06b_7f47b_c631
+
+  JCasC:
+    enabled: true
+    configScripts:
+      welcome-message: |
+        jenkins:
+          systemMessage: "Jenkins Blue-Green Deployment System"
+          numExecutors: 5
+          clouds:
+            - kubernetes:
+                containerCap: 10
+                maxRequestsPerHost: 32
+                jenkinsUrl: "http://jenkins.jenkins.svc.cluster.local:8080"
+                name: "kubernetes"
+                namespace: "jenkins"
+                serverUrl: "https://kubernetes.default"
+                podLabels:
+                  - key: "jenkins/jenkins-jenkins-agent"
+                    value: "true"
+                templates:
+                  - containers:
+                      - args: "cat"
+                        command: "/bin/sh -c"
+                        image: "jenkins/inbound-agent:latest"
+                        name: "jnlp"
+                        ttyEnabled: true
+                        workingDir: "/tmp"
+                    name: "default"
+                    nodeUsageMode: "NORMAL"
+                    podRetention: "never"
+                    serviceAccount: "jenkins"
+                    slaveConnectTimeout: 100
+                    yamlMergeStrategy: "override"
+
+  resources:
+    requests:
+      cpu: "1000m"
+      memory: "2Gi"
+    limits:
+      cpu: "2000m"
+      memory: "4Gi"
+
+  serviceAccount:
+    create: true
+    name: jenkins
+
+persistence:
+  enabled: true
+  size: 20Gi
+  storageClass: ""

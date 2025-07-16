@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nodejs-app-blue
+  namespace: default
+  labels:
+    app: nodejs-app
+    version: blue
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nodejs-app
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: nodejs-app
+        version: blue
+    spec:
+      containers:
+      - name: nodejs-app
+        image: AWS_ACCOUNT_PLACEHOLDER.dkr.ecr.AWS_REGION_PLACEHOLDER.amazonaws.com/nodejs-app:blue
+        ports:
+        - containerPort: 3000
+        env:
+        - name: VERSION
+          value: "blue"
+        - name: BUILD_NUMBER
+          value: "1"
+        - name: PORT
+          value: "3000"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
