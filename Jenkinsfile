@@ -9,9 +9,30 @@ pipeline {
     K8S_NAMESPACE = 'default'
     SERVICE_NAME = 'blue-green'
     DEPLOYMENT_TEMPLATE = "k8s-manifests/app/${params.DEPLOY_COLOR}-deployment.yaml"
-    IMAGE = '' // Initialize IMAGE variable at pipeline level
+    IMAGE = ''
+    // Add tool paths
+    AWS_CLI = '/usr/local/bin/aws'
+    DOCKER = '/usr/bin/docker'
+    KUBECTL = '/usr/local/bin/kubectl'
   }
   stages {
+    stage('Verify Tools') {
+      steps {
+        script {
+          sh '''
+            echo "Checking for required tools..."
+            which aws || echo "AWS CLI not found in PATH"
+            which docker || echo "Docker not found in PATH"
+            which kubectl || echo "kubectl not found in PATH"
+            
+            # Try common installation locations
+            find /usr -name "aws" 2>/dev/null || echo "AWS CLI not found in /usr"
+            find /usr -name "docker" 2>/dev/null || echo "Docker not found in /usr"
+            find /usr -name "kubectl" 2>/dev/null || echo "kubectl not found in /usr"
+          '''
+        }
+      }
+    }
     stage('Checkout') {
       steps {
         git branch: 'main', url: 'https://github.com/Divya12377/k8s-jenkins-bluegreen.git'
@@ -22,9 +43,9 @@ pipeline {
         script {
           def imageTag = "${AWS_ECR}/${IMAGE_NAME}:${BUILD_NUMBER}"
           sh """
-            aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin ${AWS_ECR}
-            docker build -t ${imageTag} .
-            docker push ${imageTag}
+            ${AWS_CLI} ecr get-login-password --region us-west-2 | ${DOCKER} login --username AWS --password-stdin ${AWS_ECR}
+            ${DOCKER} build -t ${imageTag} .
+            ${DOCKER} push ${imageTag}
           """
           env.IMAGE = imageTag
         }
@@ -34,8 +55,8 @@ pipeline {
       steps {
         script {
           sh """
-            sed 's|<IMAGE>|${env.IMAGE}|g' ${DEPLOYMENT_TEMPLATE} | kubectl apply -n ${K8S_NAMESPACE} -f -
-            kubectl scale deployment nodejs-app-${params.DEPLOY_COLOR} -n ${K8S_NAMESPACE} --replicas=3
+            sed 's|<IMAGE>|${env.IMAGE}|g' ${DEPLOYMENT_TEMPLATE} | ${KUBECTL} apply -n ${K8S_NAMESPACE} -f -
+            ${KUBECTL} scale deployment nodejs-app-${params.DEPLOY_COLOR} -n ${K8S_NAMESPACE} --replicas=3
           """
         }
       }
@@ -60,7 +81,7 @@ pipeline {
       steps {
         script {
           sh """
-            kubectl patch svc ${SERVICE_NAME} -n ${K8S_NAMESPACE} \
+            ${KUBECTL} patch svc ${SERVICE_NAME} -n ${K8S_NAMESPACE} \
               -p '{"spec": {"selector": {"app": "nodejs-app", "version": "${params.DEPLOY_COLOR}"}}}'
           """
         }
@@ -70,7 +91,7 @@ pipeline {
       steps {
         script {
           def OLD = (params.DEPLOY_COLOR == 'blue') ? 'green' : 'blue'
-          sh "kubectl scale deployment nodejs-app-${OLD} -n ${K8S_NAMESPACE} --replicas=0"
+          sh "${KUBECTL} scale deployment nodejs-app-${OLD} -n ${K8S_NAMESPACE} --replicas=0"
         }
       }
     }
@@ -81,17 +102,16 @@ pipeline {
         def OLD = (params.DEPLOY_COLOR == 'blue') ? 'green' : 'blue'
         def rollbackTemplate = "k8s-manifests/app/${OLD}-deployment.yaml"
         echo "Rolling back to previous version: ${OLD}"
-        // Get the latest stable image for rollback instead of using current IMAGE
         def latestStableImage = sh(script: """
-          kubectl get deployment nodejs-app-${OLD} -n ${K8S_NAMESPACE} -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '${AWS_ECR}/${IMAGE_NAME}:latest'
+          ${KUBECTL} get deployment nodejs-app-${OLD} -n ${K8S_NAMESPACE} -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '${AWS_ECR}/${IMAGE_NAME}:latest'
         """, returnStdout: true).trim()
         
         sh """
-          sed 's|<IMAGE>|${latestStableImage}|g' ${rollbackTemplate} | kubectl apply -n ${K8S_NAMESPACE} -f -
-          kubectl scale deployment nodejs-app-${OLD} -n ${K8S_NAMESPACE} --replicas=3
-          kubectl patch svc ${SERVICE_NAME} -n ${K8S_NAMESPACE} \
+          sed 's|<IMAGE>|${latestStableImage}|g' ${rollbackTemplate} | ${KUBECTL} apply -n ${K8S_NAMESPACE} -f -
+          ${KUBECTL} scale deployment nodejs-app-${OLD} -n ${K8S_NAMESPACE} --replicas=3
+          ${KUBECTL} patch svc ${SERVICE_NAME} -n ${K8S_NAMESPACE} \
             -p '{"spec": {"selector": {"app": "nodejs-app", "version": "${OLD}"}}}'
-          kubectl scale deployment nodejs-app-${params.DEPLOY_COLOR} -n ${K8S_NAMESPACE} --replicas=0
+          ${KUBECTL} scale deployment nodejs-app-${params.DEPLOY_COLOR} -n ${K8S_NAMESPACE} --replicas=0
         """
       }
     }
