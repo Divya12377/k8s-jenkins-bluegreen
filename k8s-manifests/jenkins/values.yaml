@@ -1,10 +1,45 @@
 controller:
+  # Correct image configuration format - as an object, not string
+  image:
+    registry: "603480426027.dkr.ecr.us-west-2.amazonaws.com"
+    repository: "custom-jenkins"
+    tag: "latest"
+    pullPolicy: "Always"
+  
+  # Security context
+  runAsUser: 0
+  fsGroup: 0
+  containerSecurityContext:
+    privileged: true
+  
+  # Network configuration
   serviceType: LoadBalancer
   servicePort: 80
+  targetPort: 8080
+  serviceAnnotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+  
+  # Volumes for Docker and AWS
+  volumes:
+    - name: docker-sock
+      hostPath:
+        path: /var/run/docker.sock
+  volumeMounts:
+    - name: docker-sock
+      mountPath: /var/run/docker.sock
+  
+  # Java options
+  javaOpts: >-
+    -Xmx3g
+    -Djenkins.install.runSetupWizard=false
+    -Dhudson.plugins.git.GitSCM.ALLOW_LOCAL_CHECKOUT=true
 
+  # Admin credentials (use existing secret)
   admin:
-    password: JENKINS_ADMIN_PASSWORD_PLACEHOLDER
+    existingSecret: "jenkins-admin-creds"
+    passwordKey: "JENKINS_ADMIN_PASSWORD"
 
+  # Plugins
   installPlugins:
     - kubernetes:4029.v5712230ccb_04
     - workflow-aggregator:596.v8c21c963d92d
@@ -43,6 +78,7 @@ controller:
     - junit:1217.v4297208a_a_b_ce
     - matrix-project:785.v06b_7f47b_c631
 
+  # JCasC configuration
   JCasC:
     enabled: true
     configScripts:
@@ -76,6 +112,7 @@ controller:
                     slaveConnectTimeout: 100
                     yamlMergeStrategy: "override"
 
+  # Resource limits
   resources:
     requests:
       cpu: "1000m"
@@ -84,11 +121,16 @@ controller:
       cpu: "2000m"
       memory: "4Gi"
 
+  # Service account
   serviceAccount:
     create: true
     name: jenkins
+    annotations:
+      eks.amazonaws.com/role-arn: "arn:aws:iam::603480426027:role/jenkins-role"
 
+# Persistence configuration
 persistence:
   enabled: true
   size: 20Gi
-  storageClass: ""
+  storageClass: "gp3"
+  accessMode: ReadWriteOnce
