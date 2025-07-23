@@ -1,25 +1,22 @@
 pipeline {
   agent any
-
   parameters {
     choice(name: 'DEPLOY_COLOR', choices: ['blue', 'green'], description: 'Which environment to deploy')
   }
-
   environment {
     AWS_ECR = '603480426027.dkr.ecr.us-west-2.amazonaws.com'
     IMAGE_NAME = 'nodejs-app'
     K8S_NAMESPACE = 'default'
     SERVICE_NAME = 'blue-green'
     DEPLOYMENT_TEMPLATE = "k8s-manifests/app/${params.DEPLOY_COLOR}-deployment.yaml"
+    IMAGE = '' // Initialize IMAGE variable at pipeline level
   }
-
   stages {
     stage('Checkout') {
       steps {
-        git 'https://github.com/Divya12377/k8s-jenkins-bluegreen.git'
+        git branch: 'main', url: 'https://github.com/Divya12377/k8s-jenkins-bluegreen.git'
       }
     }
-
     stage('Build & Push Docker Image') {
       steps {
         script {
@@ -33,18 +30,16 @@ pipeline {
         }
       }
     }
-
     stage('Deploy to Kubernetes') {
       steps {
         script {
           sh """
-            sed 's|<IMAGE>|${IMAGE}|g' ${DEPLOYMENT_TEMPLATE} | kubectl apply -n ${K8S_NAMESPACE} -f -
+            sed 's|<IMAGE>|${env.IMAGE}|g' ${DEPLOYMENT_TEMPLATE} | kubectl apply -n ${K8S_NAMESPACE} -f -
             kubectl scale deployment nodejs-app-${params.DEPLOY_COLOR} -n ${K8S_NAMESPACE} --replicas=3
           """
         }
       }
     }
-
     stage('Health Check') {
       steps {
         script {
@@ -55,14 +50,12 @@ pipeline {
             done
             exit 1
           """, returnStatus: true)
-
           if (status != 0) {
             error "Health check failed! Triggering rollback..."
           }
         }
       }
     }
-
     stage('Switch Traffic') {
       steps {
         script {
@@ -73,7 +66,6 @@ pipeline {
         }
       }
     }
-
     stage('Scale Down Old') {
       steps {
         script {
@@ -83,17 +75,19 @@ pipeline {
       }
     }
   }
-
   post {
     failure {
       script {
         def OLD = (params.DEPLOY_COLOR == 'blue') ? 'green' : 'blue'
         def rollbackTemplate = "k8s-manifests/app/${OLD}-deployment.yaml"
-
         echo "Rolling back to previous version: ${OLD}"
-
+        // Get the latest stable image for rollback instead of using current IMAGE
+        def latestStableImage = sh(script: """
+          kubectl get deployment nodejs-app-${OLD} -n ${K8S_NAMESPACE} -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '${AWS_ECR}/${IMAGE_NAME}:latest'
+        """, returnStdout: true).trim()
+        
         sh """
-          sed 's|<IMAGE>|${IMAGE}|g' ${rollbackTemplate} | kubectl apply -n ${K8S_NAMESPACE} -f -
+          sed 's|<IMAGE>|${latestStableImage}|g' ${rollbackTemplate} | kubectl apply -n ${K8S_NAMESPACE} -f -
           kubectl scale deployment nodejs-app-${OLD} -n ${K8S_NAMESPACE} --replicas=3
           kubectl patch svc ${SERVICE_NAME} -n ${K8S_NAMESPACE} \
             -p '{"spec": {"selector": {"app": "nodejs-app", "version": "${OLD}"}}}'
@@ -103,4 +97,3 @@ pipeline {
     }
   }
 }
-
