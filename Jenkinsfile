@@ -92,7 +92,7 @@ pipeline {
         
         stage('Health Check') {
             when {
-                not { params.SKIP_TESTS }
+                expression { params.SKIP_TESTS != true }
             }
             steps {
                 script {
