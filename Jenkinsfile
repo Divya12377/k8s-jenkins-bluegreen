@@ -7,7 +7,7 @@ pipeline {
     }
     
     environment {
-        KUBECONFIG = credentials('kubeconfig-id')
+        // KUBECONFIG = credentials('kubeconfig-id') // Uncomment if you have kubeconfig credentials
         DOCKER_REGISTRY = '603480426027.dkr.ecr.us-west-2.amazonaws.com'
         APP_NAME = 'bluegreen-app'
         NAMESPACE = 'default'
@@ -244,9 +244,11 @@ pipeline {
     
     post {
         always {
-            script {
-                // Clean up temporary files
-                sh "rm -f /tmp/*-deployment-updated.yaml service_info.txt || true"
+            node {
+                script {
+                    // Clean up temporary files
+                    sh "rm -f /tmp/*-deployment-updated.yaml service_info.txt || true"
+                }
             }
         }
         
@@ -255,13 +257,15 @@ pipeline {
         }
         
         failure {
-            script {
-                echo "❌ Pipeline failed. Checking deployment status..."
-                sh """
-                    echo "=== Current Deployment Status ==="
-                    kubectl get deployments -n ${NAMESPACE} -l app=${APP_NAME} || echo "No deployments found"
-                    kubectl get pods -n ${NAMESPACE} -l app=${APP_NAME} || echo "No pods found"
-                """
+            node {
+                script {
+                    echo "❌ Pipeline failed. Checking deployment status..."
+                    sh """
+                        echo "=== Current Deployment Status ==="
+                        kubectl get deployments -n default -l app=bluegreen-app || echo "No deployments found"
+                        kubectl get pods -n default -l app=bluegreen-app || echo "No pods found"
+                    """
+                }
             }
         }
         
