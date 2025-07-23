@@ -10,6 +10,9 @@ pipeline {
         APP_NAME = 'bluegreen-app'
         NAMESPACE = 'default'
         IMAGE_TAG = ''
+        AWS_ACCOUNT_ID = '603480426027'
+        AWS_REGION = 'us-west-2'
+        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
     }
     
     stages {
@@ -24,44 +27,25 @@ pipeline {
             steps {
                 script {
                     echo "=== Checking for required tools ==="
+                    def missingTools = []
                     
-                    // Check if tools exist
-                    def toolsStatus = [:]
-                    
-                    try {
-                        sh "which kubectl"
-                        toolsStatus.kubectl = "✅ Available"
-                    } catch (Exception e) {
-                        toolsStatus.kubectl = "❌ Missing"
+                    // Check tools with proper error handling
+                    ['kubectl', 'docker', 'aws'].each { tool ->
+                        if (sh(script: "which ${tool}", returnStatus: true) != 0) {
+                            missingTools.add(tool)
+                        }
                     }
                     
-                    try {
-                        sh "which docker"
-                        toolsStatus.docker = "✅ Available"
-                    } catch (Exception e) {
-                        toolsStatus.docker = "❌ Missing"
-                    }
-                    
-                    try {
-                        sh "which aws"
-                        toolsStatus.aws = "✅ Available"
-                    } catch (Exception e) {
-                        toolsStatus.aws = "❌ Missing"
-                    }
-                    
-                    echo "=== Tool Status ==="
-                    toolsStatus.each { tool, status ->
-                        echo "${tool}: ${status}"
-                    }
-                    
-                    // Check if any critical tools are missing
-                    def missingTools = toolsStatus.findAll { k, v -> v.contains("Missing") }
-                    if (!missingTools.isEmpty()) {
-                        echo "⚠️  WARNING: Missing required tools: ${missingTools.keySet().join(', ')}"
-                        echo "Please install these tools before proceeding with deployment"
+                    if (missingTools) {
+                        error("❌ Missing critical tools: ${missingTools.join(', ')}. Pipeline aborted.")
+                    } else {
+                        echo "✅ All tools are available"
                         
-                        // For demo purposes, we'll continue but mark as unstable
-                        currentBuild.result = 'UNSTABLE'
+                        // Verify AWS and ECR access
+                        sh """
+                            aws sts get-caller-identity
+                            aws ecr get-login-password | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                        """
                     }
                 }
             }
@@ -70,9 +54,20 @@ pipeline {
         stage('Generate Image Tag') {
             steps {
                 script {
-                    def timestamp = sh(script: "date +%Y%m%d%H%M%S", returnStdout: true).trim()
-                    env.IMAGE_TAG = "603480426027.dkr.ecr.us-west-2.amazonaws.com/${APP_NAME}:${timestamp}"
+                    def timestamp = new Date().format('yyyyMMddHHmmss')
+                    env.IMAGE_TAG = "${ECR_REGISTRY}/${APP_NAME}:${timestamp}"
                     echo "Generated image tag: ${env.IMAGE_TAG}"
+                }
+            }
+        }
+        
+        stage('Build & Push Docker Image') {
+            steps {
+                script {
+                    docker.build("${env.IMAGE_TAG}", "./app")
+                    docker.withRegistry("https://${ECR_REGISTRY}", 'ecr-credentials') {
+                        docker.image("${env.IMAGE_TAG}").push()
+                    }
                 }
             }
         }
@@ -80,60 +75,38 @@ pipeline {
         stage('Prepare Deployment') {
             steps {
                 script {
-                    echo "=== Preparing ${params.ENVIRONMENT} deployment ==="
-                    echo "Target environment: ${params.ENVIRONMENT}"
-                    echo "Application name: ${APP_NAME}"
-                    echo "Namespace: ${NAMESPACE}"
-                    echo "Image tag: ${env.IMAGE_TAG}"
-                    
-                    // Check if manifest files exist
-                    def manifestExists = fileExists("k8s/${params.ENVIRONMENT}-deployment.yaml")
-                    if (!manifestExists) {
-                        echo "⚠️  WARNING: Manifest file k8s/${params.ENVIRONMENT}-deployment.yaml not found"
-                        echo "Please ensure your Kubernetes manifests are in the k8s/ directory"
+                    def manifestFile = "k8s-manifests/${params.ENVIRONMENT}-deployment.yaml"
+                    if (!fileExists(manifestFile)) {
+                        error("❌ Manifest file ${manifestFile} not found!")
                     }
                     
-                    // Simulate manifest preparation
-                    echo "Would update k8s/${params.ENVIRONMENT}-deployment.yaml with image: ${env.IMAGE_TAG}"
+                    // Update image tag in manifest (simplified example)
+                    sh """
+                        sed -i "s|image:.*|image: ${env.IMAGE_TAG}|g" ${manifestFile}
+                    """
+                    echo "Updated ${manifestFile} with image: ${env.IMAGE_TAG}"
                 }
             }
         }
         
         stage('Deploy to Kubernetes') {
-            when {
-                expression { 
-                    // Only deploy if kubectl is available
-                    try {
-                        sh "which kubectl"
-                        return true
-                    } catch (Exception e) {
-                        echo "Skipping deployment - kubectl not available"
-                        return false
-                    }
-                }
-            }
             steps {
                 script {
                     echo "🚀 Deploying to ${params.ENVIRONMENT} environment"
                     
-                    try {
-                        // Check if we can connect to cluster
-                        sh "kubectl cluster-info --request-timeout=10s"
-                        
-                        // Apply deployment
-                        sh """
-                            echo "Applying deployment for ${params.ENVIRONMENT}"
-                            # kubectl apply -f k8s/${params.ENVIRONMENT}-deployment.yaml
-                            # kubectl apply -f k8s/${params.ENVIRONMENT}-service.yaml
-                            echo "Deployment commands would be executed here"
-                        """
-                        
-                        echo "✅ Deployment completed successfully"
-                        
-                    } catch (Exception e) {
-                        echo "❌ Deployment failed: ${e.getMessage()}"
-                        echo "This might be due to missing kubeconfig or cluster connectivity issues"
-                        currentBuild.result = 'UNSTABLE'
+                    sh """
+                        kubectl apply -f k8s-manifests/${params.ENVIRONMENT}-deployment.yaml
+                        kubectl apply -f k8s-manifests/${params.ENVIRONMENT}-service.yaml
+                    """
+                    
+                    // Verify deployment
+                    def rolloutStatus = sh(
+                        script: "kubectl rollout status deployment/${APP_NAME}-${params.ENVIRONMENT} -n ${NAMESPACE} --timeout=60s",
+                        returnStatus: true
+                    )
+                    
+                    if (rolloutStatus != 0) {
+                        error("❌ Deployment failed!")
                     }
                 }
             }
@@ -146,97 +119,33 @@ pipeline {
             steps {
                 script {
                     echo "🏥 Performing health check on ${params.ENVIRONMENT} environment"
+                    def serviceUrl = sh(
+                        script: "kubectl get svc ${APP_NAME}-${params.ENVIRONMENT} -n ${NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
+                        returnStdout: true
+                    ).trim()
                     
-                    // Simulate health check
-                    echo "Would perform health check on deployed application"
-                    echo "Checking endpoint: http://${APP_NAME}-${params.ENVIRONMENT}.${NAMESPACE}.svc.cluster.local"
-                    
-                    // Simulate success for demo
-                    sleep(2)
-                    echo "✅ Health check completed"
-                }
-            }
-        }
-        
-        stage('Deployment Summary') {
-            steps {
-                script {
-                    def summary = """
-                    🎯 DEPLOYMENT SUMMARY
-                    =====================
-                    Environment: ${params.ENVIRONMENT}
-                    Application: ${APP_NAME}
-                    Namespace: ${NAMESPACE}
-                    Image Tag: ${env.IMAGE_TAG}
-                    Skip Tests: ${params.SKIP_TESTS}
-                    Build Number: ${BUILD_NUMBER}
-                    
-                    Status: Ready for traffic switch
+                    // Simple curl test (replace with your actual health check)
+                    sh """
+                        curl -sSf http://${serviceUrl}:8080/healthz || {
+                            echo "❌ Health check failed"
+                            exit 1
+                        }
                     """
-                    
-                    echo summary
+                    echo "✅ Health check passed"
                 }
             }
         }
         
-        stage('Manual Approval') {
-            steps {
-                script {
-                    def deploymentInfo = """
-                    Deployment to ${params.ENVIRONMENT} environment is complete.
-                    
-                    Please verify the deployment and choose your next action:
-                    - PROCEED: Continue with traffic switch
-                    - ROLLBACK: Rollback to previous version  
-                    - ABORT: Stop the deployment process
-                    """
-                    
-                    echo deploymentInfo
-                    
-                    def userChoice = input(
-                        message: 'What would you like to do next?',
-                        parameters: [
-                            choice(
-                                name: 'ACTION',
-                                choices: ['PROCEED', 'ROLLBACK', 'ABORT'],
-                                description: 'Choose the next action'
-                            )
-                        ]
-                    )
-                    
-                    env.USER_ACTION = userChoice
-                    echo "User selected: ${env.USER_ACTION}"
-                }
-            }
-        }
-        
-        stage('Execute Action') {
+        stage('Traffic Switch') {
             steps {
                 script {
                     def otherEnv = (params.ENVIRONMENT == 'blue') ? 'green' : 'blue'
                     
-                    switch(env.USER_ACTION) {
-                        case 'PROCEED':
-                            echo "🟢 PROCEEDING with ${params.ENVIRONMENT} deployment"
-                            echo "Would switch traffic from ${otherEnv} to ${params.ENVIRONMENT}"
-                            echo "Would scale down ${otherEnv} environment"
-                            currentBuild.description = "✅ Deployed to ${params.ENVIRONMENT}"
-                            break
-                            
-                        case 'ROLLBACK':
-                            echo "🔄 ROLLING BACK to ${otherEnv} environment"
-                            echo "Would restore ${otherEnv} environment"
-                            echo "Would scale down ${params.ENVIRONMENT} environment"
-                            currentBuild.description = "🔄 Rolled back to ${otherEnv}"
-                            break
-                            
-                        case 'ABORT':
-                            echo "🛑 ABORTING deployment"
-                            echo "Would clean up ${params.ENVIRONMENT} deployment"
-                            currentBuild.result = 'ABORTED'
-                            error("Deployment aborted by user")
-                            break
-                    }
+                    // Scale down the inactive environment
+                    sh """
+                        kubectl scale deployment/${APP_NAME}-${otherEnv} -n ${NAMESPACE} --replicas=0
+                    """
+                    echo "Traffic switched to ${params.ENVIRONMENT} (${otherEnv} scaled down)"
                 }
             }
         }
@@ -244,13 +153,8 @@ pipeline {
         stage('Cleanup') {
             steps {
                 script {
-                    echo "🧹 Performing final cleanup"
-                    try {
-                        sh "echo 'Cleanup completed at: \$(date)'"
-                        sh "pwd && ls -la || true"
-                    } catch (Exception e) {
-                        echo "Cleanup completed (shell commands not available)"
-                    }
+                    echo "🧹 Cleaning up temporary files"
+                    sh "find . -name '*.tmp' -delete"
                 }
             }
         }
@@ -260,40 +164,22 @@ pipeline {
         always {
             script {
                 echo "🧹 Pipeline cleanup completed"
-                // Cleanup operations that don't require sh commands
-                try {
-                    echo "Workspace: ${WORKSPACE}"
-                } catch (Exception e) {
-                    echo "Cleanup completed"
-                }
+                // Send notification (example)
+                emailext (
+                    subject: "Pipeline ${currentBuild.result ?: 'SUCCESS'} - ${env.JOB_NAME}",
+                    body: "View build: ${env.BUILD_URL}",
+                    to: 'your-email@example.com'
+                )
             }
         }
         
         success {
-            script {
-                echo "🎉 Pipeline completed successfully!"
-                echo "Final status: ${currentBuild.description ?: 'Completed'}"
-            }
+            echo "🎉 Pipeline succeeded!"
         }
         
         failure {
-            script {
-                echo "❌ Pipeline failed!"
-                echo "Check the logs above for details"
-            }
-        }
-        
-        aborted {
-            script {
-                echo "🛑 Pipeline was aborted"
-            }
-        }
-        
-        unstable {
-            script {
-                echo "⚠️  Pipeline completed with warnings"
-                echo "Some tools may be missing - please check the prerequisites"
-            }
+            echo "❌ Pipeline failed!"
+            // Optional rollback logic could be added here
         }
     }
 }
