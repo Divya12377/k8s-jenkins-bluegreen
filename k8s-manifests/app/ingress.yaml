@@ -1,39 +1,22 @@
+# ✅ ingress.yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: nodejs-app
+  name: blue-green-ingress
   namespace: default
   annotations:
-    kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/healthcheck-path: /health
-    alb.ingress.kubernetes.io/actions.blue-green: |
-      {
-        "type":"forward",
-        "forwardConfig":{
-          "targetGroups":[
-            {
-              "serviceName":"nodejs-app-blue",
-              "servicePort":80,
-              "weight":100
-            },
-            {
-              "serviceName":"nodejs-app-green",
-              "servicePort":80,
-              "weight":0
-            }
-          ]
-        }
-      }
+    nginx.ingress.kubernetes.io/rewrite-target: /
 spec:
+  ingressClassName: nginx
   rules:
-  - http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: blue-green
-            port:
-              name: use-annotation
+    - host: aaa72dc9d10da4d1cbc664ee91114d82-715267764.us-west-2.elb.amazonaws.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: blue-green
+                port:
+                  number: 80
+

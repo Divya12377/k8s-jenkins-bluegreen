@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
       - name: nodejs-app
-        image: AWS_ACCOUNT_PLACEHOLDER.dkr.ecr.AWS_REGION_PLACEHOLDER.amazonaws.com/nodejs-app:blue
+        image: 603480426027.dkr.ecr.us-east-1.amazonaws.com/nodejs-app:blue
         ports:
         - containerPort: 3000
         env:
