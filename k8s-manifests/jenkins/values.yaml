@@ -19,27 +19,89 @@ controller:
   serviceAnnotations:
     service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
   
-  # Volumes for Docker and AWS
+  # Volumes for Docker, AWS, and Tools
   volumes:
     - name: docker-sock
       hostPath:
         path: /var/run/docker.sock
+    - name: aws-credentials
+      secret:
+        secretName: aws-credentials
+        defaultMode: 0600
+    - name: tools-volume
+      emptyDir: {}
+    - name: kubectl-config
+      emptyDir: {}
+  
   volumeMounts:
     - name: docker-sock
       mountPath: /var/run/docker.sock
+    - name: aws-credentials
+      mountPath: /home/jenkins/.aws/
+      readOnly: true
+    - name: tools-volume
+      mountPath: /usr/local/bin-custom
+    - name: kubectl-config
+      mountPath: /home/jenkins/.kube/
   
-  # Java options
+  # Init container to install tools
+  initContainers:
+    - name: install-tools
+      image: alpine:3.18
+      command: ["/bin/sh"]
+      args:
+        - -c
+        - |
+          set -e
+          echo "Installing kubectl..."
+          apk add --no-cache curl
+          KUBECTL_VERSION=$(curl -s https://dl.k8s.io/release/stable.txt)
+          curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          mv kubectl /tools/
+          
+          echo "Installing AWS CLI..."
+          apk add --no-cache python3 py3-pip
+          pip3 install awscli
+          cp /usr/bin/aws /tools/
+          
+          echo "Creating tool wrapper scripts..."
+          cat > /tools/kubectl-wrapper << 'EOF'
+          #!/bin/bash
+          export KUBECONFIG=/var/run/secrets/kubernetes.io/serviceaccount/
+          /tools/kubectl "$@"
+          EOF
+          chmod +x /tools/kubectl-wrapper
+          
+          echo "Tools installation completed!"
+          ls -la /tools/
+      volumeMounts:
+        - name: tools-volume
+          mountPath: /tools
+  
+  # Java options with additional PATH
   javaOpts: >-
     -Xmx3g
     -Djenkins.install.runSetupWizard=false
     -Dhudson.plugins.git.GitSCM.ALLOW_LOCAL_CHECKOUT=true
+
+  # Environment variables for tools
+  containerEnv:
+    - name: PATH
+      value: "/usr/local/bin-custom:/usr/local/bin:/usr/bin:/bin"
+    - name: AWS_CONFIG_FILE
+      value: "/home/jenkins/.aws/config"
+    - name: AWS_SHARED_CREDENTIALS_FILE
+      value: "/home/jenkins/.aws/credentials"
+    - name: KUBECONFIG
+      value: "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
   # Admin credentials (use existing secret)
   admin:
     existingSecret: "jenkins-admin-creds"
     passwordKey: "JENKINS_ADMIN_PASSWORD"
 
-  # Plugins
+  # Updated plugins list with email extension
   installPlugins:
     - kubernetes:4029.v5712230ccb_04
     - workflow-aggregator:596.v8c21c963d92d
@@ -77,8 +139,10 @@ controller:
     - mailer:448.v5b_97805e3767
     - junit:1217.v4297208a_a_b_ce
     - matrix-project:785.v06b_7f47b_c631
+    - email-ext:2.96
+    - build-user-vars-plugin:1.9
 
-  # JCasC configuration
+  # JCasC configuration with updated agent template
   JCasC:
     enabled: true
     configScripts:
@@ -105,7 +169,31 @@ controller:
                         name: "jnlp"
                         ttyEnabled: true
                         workingDir: "/tmp"
+                        envVars:
+                          - envVar:
+                              key: "PATH"
+                              value: "/usr/local/bin:/usr/bin:/bin"
                     name: "default"
+                    nodeUsageMode: "NORMAL"
+                    podRetention: "never"
+                    serviceAccount: "jenkins"
+                    slaveConnectTimeout: 100
+                    yamlMergeStrategy: "override"
+                    volumes:
+                      - hostPathVolume:
+                          hostPath: "/var/run/docker.sock"
+                          mountPath: "/var/run/docker.sock"
+                      - secretVolume:
+                          secretName: "aws-credentials"
+                          mountPath: "/home/jenkins/.aws/"
+                  - containers:
+                      - args: "cat"
+                        command: "/bin/sh -c"
+                        image: "603480426027.dkr.ecr.us-west-2.amazonaws.com/jenkins-agent-tools:latest"
+                        name: "jnlp"
+                        ttyEnabled: true
+                        workingDir: "/tmp"
+                    name: "tools-agent"
                     nodeUsageMode: "NORMAL"
                     podRetention: "never"
                     serviceAccount: "jenkins"
@@ -121,12 +209,23 @@ controller:
       cpu: "2000m"
       memory: "4Gi"
 
-  # Service account
+  # Service account with additional permissions
   serviceAccount:
     create: true
     name: jenkins
     annotations:
       eks.amazonaws.com/role-arn: "arn:aws:iam::603480426027:role/jenkins-role"
+
+# Additional RBAC for Jenkins to manage deployments
+rbac:
+  create: true
+  readSecrets: true
+
+serviceAccount:
+  create: true
+  name: jenkins
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::603480426027:role/jenkins-role"
 
 # Persistence configuration
 persistence:
