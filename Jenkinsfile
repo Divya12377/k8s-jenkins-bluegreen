@@ -13,7 +13,7 @@ pipeline {
         AWS_ACCOUNT_ID = '603480426027'
         AWS_REGION = 'us-west-2'
         ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-        DOMAIN = 'aaa72dc9d10da4d1cbc664ee91114d82-715267764.us-west-2.elb.amazonaws.com'  // Update with your real domain
+        DOMAIN = 'aaa72dc9d10da4d1cbc664ee91114d82-715267764.us-west-2.elb.amazonaws.com'
     }
     
     stages {
@@ -28,16 +28,21 @@ pipeline {
             steps {
                 script {
                     echo "🔍 Verifying required tools..."
-                    def tools = ['kubectl', 'docker', 'aws']
-                    tools.each { tool ->
+                    
+                    // Install kubectl if missing
+                    if (sh(script: "which kubectl", returnStatus: true) != 0) {
+                        echo "Installing kubectl..."
                         sh """
-                            if ! command -v ${tool} &> /dev/null; then
-                                echo "❌ ${tool} not found!"
-                                exit 1
-                            else
-                                echo "✅ ${tool} is available"
-                            fi
+                            curl -LO "https://dl.k8s.io/release/\$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                            install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
                         """
+                    }
+                    
+                    // Verify other tools
+                    ['docker', 'aws'].each { tool ->
+                        if (sh(script: "which ${tool}", returnStatus: true) != 0) {
+                            error("❌ ${tool} not found! Please install it on Jenkins workers.")
+                        }
                     }
                     
                     // Verify cluster access
@@ -138,12 +143,6 @@ pipeline {
                         
                         echo "✅ Traffic switched from ${currentService} to nodejs-app-${params.ENVIRONMENT}"
                     }
-                    
-                    // Optional: Scale down old deployment
-                    def oldEnv = (params.ENVIRONMENT == 'blue') ? 'green' : 'blue'
-                    sh """
-                        kubectl scale deployment/${APP_NAME}-${oldEnv} --replicas=0
-                    """
                 }
             }
         }
@@ -152,14 +151,14 @@ pipeline {
     post {
         always {
             echo "🏁 Pipeline execution completed"
-            cleanWs()
+            // Basic cleanup without cleanWs plugin
+            deleteDir()
         }
         success {
             echo "🎉 Successfully deployed to ${params.ENVIRONMENT} environment!"
         }
         failure {
             echo "❌ Pipeline failed - check logs for details"
-            // Optional: Add automatic rollback here
         }
     }
 }
